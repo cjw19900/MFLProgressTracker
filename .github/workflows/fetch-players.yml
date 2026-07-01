@@ -13,21 +13,40 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout code (main)
         uses: actions/checkout@v5
+        with:
+          path: code
+
+      - name: Checkout existing data (data branch, if it exists)
+        uses: actions/checkout@v5
+        with:
+          ref: data
+          path: existing-data
+        continue-on-error: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
           node-version: '24'
 
-      - name: Fetch MFL players and write data files
-        run: node scripts/fetch-players.js
+      - name: Fetch MFL players and write chunked data files
+        run: node code/scripts/fetch-players.js
+        env:
+          EXISTING_DATA_DIR: ${{ github.workspace }}/existing-data/data
+          OUTPUT_DATA_DIR: ${{ github.workspace }}/new-data/data
 
-      - name: Commit and push updated data
+      # The data branch is rebuilt from scratch every run and force-pushed.
+      # This keeps it as a single lightweight commit forever, instead of
+      # accumulating a new ~100MB+ snapshot in git history every single day.
+      - name: Publish fresh snapshot to the data branch
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
-          git diff --cached --quiet || git commit -m "Update player data $(date -u +%Y-%m-%d)"
-          git push
+          mkdir -p publish
+          cd publish
+          git init -q
+          git checkout -q --orphan data
+          cp -r "${{ github.workspace }}/new-data/data" .
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Update player data $(date -u +%Y-%m-%d)"
+          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data:data
