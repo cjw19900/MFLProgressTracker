@@ -1,65 +1,80 @@
-# MFL Pro Tracker — no-database rebuild
+# MFL Pro Tracker — no-database rebuild (v2: chunked + branch-separated)
 
-This version drops Supabase entirely. The GitHub Action fetches player data
-from MFL, writes it to two JSON files in the repo, and commits them. GitHub
-Pages serves those files as plain static assets, and `index.html` fetches
-them directly with `fetch()`. Nothing to sign up for, nothing that can be
-paused, deleted, or lock you out — the repo *is* the database.
+## Why this version exists
+The first version of this kit committed one big `players_current.json` to
+the repo. Turns out MFL has **338,246 players**, and the full file came out
+to **105.91 MB** — over GitHub's hard 100 MB-per-file limit, so the daily
+Action's push was rejected every time. On top of that, committing a file
+that size to `main` every day would have bloated the repo by tens of GB a
+year.
+
+This version fixes both problems:
+- **Chunking** — data is split into ~50,000-record files (about 15–16 MB
+  each at current scale), safely under the limit with room for the player
+  count to grow a lot before this needs revisiting.
+- **A dedicated `data` branch** — instead of accumulating a new commit on
+  `main` every day, the Action rebuilds the `data` branch from scratch each
+  run and force-pushes it. That branch always contains just one commit —
+  today's snapshot — so it never grows over time. Your `main` branch (the
+  actual site code) is never touched by the daily runs at all.
+
+Nothing about this changes what you, personally, have to do day-to-day —
+it's still fully automatic. It only changes what the Action does internally.
 
 ## What's in this folder
-- `scripts/fetch-players.js` — fetches MFL data, writes `data/*.json`
-- `.github/workflows/fetch-players.yml` — daily cron that runs the script and commits the result
-- `index.html` — the front end, reads the JSON files directly
-- `data/` — seed files (`[]`) so the site works before the first Action run
+- `index.html` — front end, now fetches chunked files from the `data`
+  branch via `raw.githubusercontent.com` (auto-detects your username/repo
+  from the page URL — no config needed if you're using the default
+  `https://username.github.io/repo-name/` Pages URL)
+- `scripts/fetch-players.js` — fetches MFL data, writes chunked JSON files
+  plus a small manifest per dataset
+- `.github/workflows/fetch-players.yml` — checks out `main` (for the
+  script) and the existing `data` branch (to preserve the baseline), then
+  publishes a fresh single-commit snapshot to `data`
+- `README.md`
 
-## Setup steps
+Notice there's no `data/` folder in this kit — data no longer lives on
+`main` at all.
 
-### 1. Create the repo
-Push all these files to a new GitHub repo, preserving the folder structure
-(`scripts/`, `.github/workflows/`, `data/`, and `index.html` at the root).
+## If you already set up the first version
+You only need to replace three files in your existing repo with the ones
+in this folder — same method as before (edit each file on GitHub, or
+delete and re-create at the same path, and paste in the new content):
+- `index.html`
+- `scripts/fetch-players.js`
+- `.github/workflows/fetch-players.yml`
 
-### 2. Let Actions push commits
-Go to your repo → Settings → Actions → General → scroll to "Workflow
-permissions" → select **"Read and write permissions"** → Save.
-This is the only settings change required — no secrets, no API keys, no
-external accounts. The Action uses GitHub's own built-in token to commit.
+Everything else you already did still applies as-is:
+- "Read and write permissions" for Actions — already set, no change needed
+- GitHub Pages pointed at `main` — already set, no change needed (the site
+  code still lives on `main`; only the data moved)
 
-### 3. Enable GitHub Pages
-Repo → Settings → Pages → Source: "Deploy from a branch" → Branch: `main` /
-root. Your site will be live at `https://<your-username>.github.io/<repo-name>/`.
+The old `data/players_current.json` / `players_sos.json` placeholder files
+sitting on `main` from the first attempt are now unused — safe to delete
+whenever you like, not urgent, not required for anything to work.
 
-### 4. Run the Action once to seed the baseline
-Repo → Actions tab → "Daily MFL Player Fetch" → Run workflow (the manual
-`workflow_dispatch` trigger). This is the important one: whichever day you
-run this first is the day that becomes everyone's permanent "before"
-snapshot (`data/players_sos.json`). After that it runs automatically every
-day at 01:00 UTC and only *adds* newly-seen players to the baseline — it
-never overwrites existing baseline rows.
+## Setup steps (from scratch)
+If you're starting fresh rather than upgrading:
 
-### 5. Check it worked
-- Actions tab: the run should finish green, and its log will show
-  "Wrote N players to players_current.json."
-- Your repo should now have a new commit "Update player data YYYY-MM-DD"
-  changing files under `data/`.
-- Open your Pages URL — it should load real data instead of the seed `[]`
-  files.
+1. **Create the repo**, upload these 4 files/folders keeping the structure
+   intact (`index.html`, `README.md`, `scripts/`, `.github/workflows/`).
+2. **Settings → Actions → General → Workflow permissions → "Read and write
+   permissions" → Save.**
+3. **Settings → Pages → Source: Deploy from a branch → `main` / root →
+   Save.**
+4. **Actions tab → "Daily MFL Player Fetch" → Run workflow.** This is the
+   deliberate one — whatever comes back becomes everyone's permanent
+   "before" snapshot.
+5. **Check it worked:**
+   - The run turns green, log ends with something like "Wrote
+     players_current: 338,246 records across 7 file(s)."
+   - A new `data` branch now exists in your repo (branch dropdown near the
+     top of the Code tab) with exactly one commit on it.
+   - Your Pages URL shows real players and numbers.
 
-## Why this is simpler than the Supabase version
-- **No account to lose access to.** The data lives in your own git history,
-  which you already control.
-- **No API keys to leak, rotate, or mismatch.** There's nothing to
-  authenticate against.
-- **No "project got paused" failure mode.** A GitHub Pages site and a
-  scheduled Action don't expire from inactivity the way a free-tier hosted
-  database can.
-- Every piece of this (repo, Actions, Pages) is something you already have
-  through your GitHub account — no new signups at all.
-
-## One thing to keep an eye on
-Every daily run commits a fresh `players_current.json`, so the repo's git
-history will grow over time (roughly however big that file is, times 365 a
-year). For a project this size that's very unlikely to be a real problem for
-a long while, but if the repo ever starts feeling heavy, the fix is to have
-the Action force-push the data to a dedicated branch that only ever holds
-the latest snapshot, instead of accumulating history on `main`. Not needed
-to get started — just something to know is there if it ever comes up.
+## Ongoing operation — unchanged
+Same as before: the Action runs itself daily at 01:00 UTC, no action from
+you. `players_current` refreshes with today's stats; `players_sos` quietly
+gets new players added while existing entries stay untouched. The only
+reason to go back in is a red/failed run in the Actions tab, which will
+have a log explaining why.

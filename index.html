@@ -180,9 +180,20 @@
 </div>
 
 <script>
-const DATA_URL_CURRENT = './data/players_current.json';
-const DATA_URL_SOS = './data/players_sos.json';
-const DATA_URL_META = './data/last_updated.json';
+// Data lives on a separate "data" branch (kept small via a fresh commit
+// each day) rather than on this "main" branch. We read it via GitHub's
+// raw file host, which serves any branch of a public repo with CORS enabled.
+// This auto-detects your username/repo from the Pages URL
+// (https://USERNAME.github.io/REPO/...). If you're using a custom domain,
+// replace RAW_BASE below with a hardcoded value instead.
+function detectRawBase() {
+  const host = location.hostname; // e.g. "yourname.github.io"
+  const parts = location.pathname.split('/').filter(Boolean); // e.g. ["repo-name", ...]
+  const user = host.split('.')[0];
+  const repo = parts[0] || '';
+  return `https://raw.githubusercontent.com/${user}/${repo}/data/data`;
+}
+const RAW_BASE = detectRawBase();
 const PAGE_SIZE = 100;
 
 // In-memory store — loaded once, filtered locally
@@ -204,10 +215,22 @@ function setProgress(pct, status) {
 }
 
 async function fetchJson(url) {
-  // Cache-bust so a fresh Action run is visible without a hard refresh
-  const res = await fetch(`${url}?t=${Date.now()}`);
+  const res = await fetch(`${url}?t=${Date.now()}`); // cache-bust
   if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
   return res.json();
+}
+
+// Reads a manifest file, then fetches every chunk it references and
+// concatenates them into one array.
+async function fetchChunked(basename, onProgress) {
+  const manifest = await fetchJson(`${RAW_BASE}/${basename}_manifest.json`);
+  let all = [];
+  for (let i = 0; i < manifest.chunks; i++) {
+    const chunk = await fetchJson(`${RAW_BASE}/${basename}_${i}.json`);
+    all = all.concat(chunk);
+    if (onProgress) onProgress(i + 1, manifest.chunks, all.length, manifest.total);
+  }
+  return all;
 }
 
 async function loadAllData() {
@@ -222,13 +245,17 @@ async function loadAllData() {
   document.getElementById('error-msg').style.display = 'none';
 
   try {
-    setProgress(10, 'Fetching baseline snapshot...');
-    const sosRaw = await fetchJson(DATA_URL_SOS);
+    setProgress(5, 'Fetching baseline snapshot...');
+    const sosRaw = await fetchChunked('players_sos', (i, n, loaded, total) => {
+      setProgress(5 + Math.round((i / n) * 35), `Baseline: chunk ${i}/${n} (${loaded.toLocaleString()}/${total.toLocaleString()} players)...`);
+    });
     sosMap = {};
     sosRaw.forEach(p => sosMap[p.ID] = p);
-    setProgress(45, `Baseline loaded: ${sosRaw.length.toLocaleString()} players. Fetching current data...`);
+    setProgress(40, `Baseline loaded: ${sosRaw.length.toLocaleString()} players. Fetching current data...`);
 
-    allCurrent = await fetchJson(DATA_URL_CURRENT);
+    allCurrent = await fetchChunked('players_current', (i, n, loaded, total) => {
+      setProgress(40 + Math.round((i / n) * 40), `Current: chunk ${i}/${n} (${loaded.toLocaleString()}/${total.toLocaleString()} players)...`);
+    });
     setProgress(80, `Current loaded: ${allCurrent.length.toLocaleString()} players. Computing improvements...`);
 
     // Pre-compute improvements for all players
@@ -264,7 +291,7 @@ async function loadAllData() {
     dataLoaded = true;
 
     try {
-      const meta = await fetchJson(DATA_URL_META);
+      const meta = await fetchJson(`${RAW_BASE}/last_updated.json`);
       document.getElementById('last-updated').textContent = `Data updated: ${new Date(meta.updated_at).toLocaleString()}`;
     } catch {
       document.getElementById('last-updated').textContent = `Loaded: ${new Date().toLocaleTimeString()}`;
@@ -275,7 +302,7 @@ async function loadAllData() {
   } catch(e) {
     document.getElementById('error-msg').textContent = `Error: ${e.message}`;
     document.getElementById('error-msg').style.display = 'block';
-    document.getElementById('table-container').innerHTML = '<div class="empty"><h3>Failed to load data</h3><p>Check that data/players_current.json and data/players_sos.json exist in the repo</p></div>';
+    document.getElementById('table-container').innerHTML = '<div class="empty"><h3>Failed to load data</h3><p>Check that the "data" branch exists and the Action has run successfully at least once</p></div>';
   }
 }
 
