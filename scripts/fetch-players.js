@@ -4,6 +4,9 @@ const path = require('path');
 const MFL_BASE = 'https://z519wdyajg.execute-api.us-east-1.amazonaws.com/prod/players';
 const LIMIT = 1500;
 
+const MFL_LISTINGS_BASE = 'https://z519wdyajg.execute-api.us-east-1.amazonaws.com/prod/listings';
+const LISTINGS_PAGE_SIZE = 50; // confirmed working page size for this endpoint
+
 // Records per output file. At MFL's current scale (~330k+ players, ~330
 // bytes/record for the full "current" record) this keeps each chunk file
 // well under GitHub's 100MB per-file limit, with plenty of headroom for
@@ -60,6 +63,63 @@ async function fetchAllPlayers() {
   return allPlayers;
 }
 
+async function fetchAllListings() {
+  let allListings = [];
+  let cursor = null;
+  let page = 0;
+
+  console.log('Starting MFL marketplace listings fetch...');
+
+  while (true) {
+    let url = `${MFL_LISTINGS_BASE}?limit=${LISTINGS_PAGE_SIZE}&type=PLAYER&status=AVAILABLE&view=full`;
+    if (cursor) url += `&beforeListingId=${cursor}`;
+
+    let res;
+    try {
+      res = await fetch(url);
+    } catch (e) {
+      throw new Error(`MFL listings API network error: ${e.message}`);
+    }
+
+    if (res.status === 403) {
+      console.log('Listings API returned 403 (rate limited) -- backing off 60s and retrying...');
+      await new Promise(r => setTimeout(r, 60000));
+      continue;
+    }
+    if (!res.ok) throw new Error(`MFL listings API error: ${res.status}`);
+
+    const batch = await res.json();
+    if (!Array.isArray(batch)) throw new Error('MFL listings API: unexpected response shape (expected an array)');
+    if (batch.length === 0) break;
+
+    allListings.push(...batch);
+    page++;
+    console.log(`Listings page ${page} | Listings: ${allListings.length.toLocaleString()}`);
+
+    if (batch.length < LISTINGS_PAGE_SIZE) {
+      console.log(`Listings fetch complete. ${allListings.length.toLocaleString()} total active listings.`);
+      break;
+    }
+
+    cursor = batch[batch.length - 1].listingResourceId;
+    if (!cursor) break;
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  return allListings;
+}
+
+function transformListing(item) {
+  const playerId = item.player?.id;
+  if (!playerId) return null;
+  return {
+    player_id: playerId,
+    price: item.price ?? null,
+    listing_id: item.listingResourceId ?? null,
+    listed_at: item.createdDateTime ?? null,
+  };
+}
+
 function transformPlayer(p) {
   const m = p.metadata || {};
   const club = p.activeContract?.club || {};
@@ -114,7 +174,10 @@ function chunkPath(dir, basename, i) {
 
 function loadChunked(dir, basename) {
   const mPath = manifestPath(dir, basename);
-  if (!fs.existsSync(mPath)) return [];
+  if (!fs.existsSync(mPath)) {
+    console.log(`No existing ${basename} manifest found at ${mPath} -- treating as empty (expected on the very first run only).`);
+    return [];
+  }
   try {
     const manifest = JSON.parse(fs.readFileSync(mPath, 'utf8'));
     let all = [];
@@ -158,6 +221,7 @@ async function main() {
   //    entries are carried over untouched -- that's what keeps them a
   //    fixed "before" snapshot.
   const existingSos = loadChunked(EXISTING_DATA_DIR, 'players_sos');
+  console.log(`Existing baseline entries found (read from ${EXISTING_DATA_DIR}): ${existingSos.length.toLocaleString()}`);
   const existingIds = new Set(existingSos.map(p => p.ID));
   const newForSos = transformed.filter(p => !existingIds.has(p.ID)).map(slimForSos);
   const mergedSos = existingSos.concat(newForSos);
@@ -166,11 +230,26 @@ async function main() {
     ? `Added ${newForSos.length.toLocaleString()} new players to the baseline (now ${mergedSos.length.toLocaleString()} total).`
     : 'No new players to add to the baseline.');
 
-  // 3. Record when this last ran successfully.
+  // 3. Marketplace listings: fully replaced every run, same as current
+  //    stats -- a listing is either active right now or it isn't.
+  //    This is wrapped so a listings-API problem can NEVER block the
+  //    core player/baseline pipeline above, which is the part that matters most.
+  let transformedListings = [];
+  try {
+    const listings = await fetchAllListings();
+    transformedListings = listings.map(transformListing).filter(Boolean);
+    writeChunked(OUTPUT_DATA_DIR, 'players_listings', transformedListings);
+  } catch (e) {
+    console.warn(`Listings fetch failed, continuing without it: ${e.message}`);
+    writeChunked(OUTPUT_DATA_DIR, 'players_listings', []);
+  }
+
+  // 4. Record when this last ran successfully.
   fs.mkdirSync(OUTPUT_DATA_DIR, { recursive: true });
   fs.writeFileSync(META_FILE, JSON.stringify({
     updated_at: new Date().toISOString(),
     player_count: transformed.length,
+    listings_count: transformedListings.length,
   }));
 
   console.log('All done!');
