@@ -142,12 +142,19 @@
       <label>Club Division</label>
       <select id="filter-division" onchange="applyFilters()">
         <option value="">All Divisions</option>
-        <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+        <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
       </select>
     </div>
     <div class="filter-group">
       <label>Min Player ID</label>
       <input type="number" id="filter-min-id" placeholder="e.g. 300000" min="0" oninput="applyFilters()" />
+    </div>
+    <div class="filter-group">
+      <label>Marketplace</label>
+      <select id="filter-listed" onchange="applyFilters()">
+        <option value="">All Players</option>
+        <option value="listed">Listed for Sale Only</option>
+      </select>
     </div>
     <div class="filter-group" id="sort-group">
       <label>Sort By</label>
@@ -254,9 +261,25 @@ async function loadAllData() {
     setProgress(40, `Baseline loaded: ${sosRaw.length.toLocaleString()} players. Fetching current data...`);
 
     allCurrent = await fetchChunked('players_current', (i, n, loaded, total) => {
-      setProgress(40 + Math.round((i / n) * 40), `Current: chunk ${i}/${n} (${loaded.toLocaleString()}/${total.toLocaleString()} players)...`);
+      setProgress(40 + Math.round((i / n) * 30), `Current: chunk ${i}/${n} (${loaded.toLocaleString()}/${total.toLocaleString()} players)...`);
     });
-    setProgress(80, `Current loaded: ${allCurrent.length.toLocaleString()} players. Computing improvements...`);
+    setProgress(70, `Current loaded: ${allCurrent.length.toLocaleString()} players. Fetching marketplace listings...`);
+
+    // Marketplace listings are a newer addition -- fetch gracefully so
+    // older data snapshots (before this was added) don't break the page.
+    let listingsMap = {};
+    try {
+      const listingsRaw = await fetchChunked('players_listings');
+      listingsRaw.forEach(l => listingsMap[l.player_id] = l);
+      setProgress(80, `Listings loaded: ${listingsRaw.length.toLocaleString()} active. Computing improvements...`);
+    } catch (e) {
+      console.warn('Marketplace listings not available yet:', e.message);
+      setProgress(80, 'Listings unavailable (older data snapshot). Computing improvements...');
+    }
+    allCurrent = allCurrent.map(p => {
+      const l = listingsMap[p.ID];
+      return l ? { ...p, listed_price: l.price, listing_id: l.listing_id } : { ...p, listed_price: null };
+    });
 
     // Pre-compute improvements for all players
     improvementsCache = allCurrent
@@ -315,6 +338,7 @@ function getFilters() {
     minChange: parseInt(document.getElementById('filter-min-change').value) || 0,
     division: document.getElementById('filter-division').value,
     minId: parseInt(document.getElementById('filter-min-id').value) || 0,
+    listedOnly: document.getElementById('filter-listed').value === 'listed',
     sort: document.getElementById('filter-sort').value,
   };
 }
@@ -331,21 +355,24 @@ function applyFilters() {
         (!f.minOverall || p.overall >= f.minOverall) &&
         (!f.division || String(p.club_division) === f.division) &&
         (!f.minChange || p.overall_change >= f.minChange) &&
-        (!f.minId || p.ID >= f.minId)
+        (!f.minId || p.ID >= f.minId) &&
+        (!f.listedOnly || p.listed_price !== null)
       )
     : allCurrent.filter(p =>
         (!f.position || p.position === f.position) &&
         (!f.nationality || p.nationality === f.nationality) &&
         (!f.minOverall || p.overall >= f.minOverall) &&
         (!f.division || String(p.club_division) === f.division) &&
-        (!f.minId || p.ID >= f.minId)
+        (!f.minId || p.ID >= f.minId) &&
+        (!f.listedOnly || p.listed_price !== null)
       );
 
   // Sort
   if (currentTab === 'improvements') {
     base.sort((a, b) => (b[f.sort] || 0) - (a[f.sort] || 0));
   } else {
-    base.sort((a, b) => (b.overall || 0) - (a.overall || 0));
+    const sortKey = (f.sort === 'ID') ? 'ID' : 'overall';
+    base.sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
   }
 
   filteredData = base;
@@ -357,6 +384,11 @@ function changeVal(val) {
   if (!val || val === 0) return `<span class="change none">—</span>`;
   if (val > 0) return `<span class="change up">+${val}</span>`;
   return `<span class="change down">${val}</span>`;
+}
+
+function listedVal(price) {
+  if (price === null || price === undefined) return `<span class="change none">—</span>`;
+  return `<span class="badge badge-pos">$${Number(price).toLocaleString()}</span>`;
 }
 
 function renderTable() {
@@ -385,7 +417,7 @@ function renderTable() {
       <th style="${thStyle('dribbling_change')}" ${thClick('dribbling_change')}>DRI ▲</th>
       <th style="${thStyle('defense_change')}" ${thClick('defense_change')}>DEF ▲</th>
       <th style="${thStyle('physical_change')}" ${thClick('physical_change')}>PHY ▲</th>
-      <th>Owner</th><th>Offers</th>
+      <th>Owner</th><th>Offers</th><th>Listed</th>
     </tr>`;
     rows = page.map(p => `<tr>
       <td><div class="player-name">${p.first_name} ${p.last_name}</div><div class="player-sub">${p.nationality||'—'} · ${p.club||'—'} (Div ${p.club_division||'—'})</div></td>
@@ -398,9 +430,10 @@ function renderTable() {
       <td>${changeVal(p.dribbling_change)}</td><td>${changeVal(p.defense_change)}</td>
       <td>${changeVal(p.physical_change)}</td>
       <td>${p.owner||'—'}</td><td>${p.offer_status||'—'}</td>
+      <td>${listedVal(p.listed_price)}</td>
     </tr>`).join('');
   } else {
-    thead = `<tr><th>Player</th><th>Pos</th><th>Age</th><th>OVR</th><th>PAC</th><th>SHO</th><th>PAS</th><th>DRI</th><th>DEF</th><th>PHY</th><th>Owner</th><th>Offers</th></tr>`;
+    thead = `<tr><th>Player</th><th>Pos</th><th>Age</th><th>OVR</th><th>PAC</th><th>SHO</th><th>PAS</th><th>DRI</th><th>DEF</th><th>PHY</th><th>Owner</th><th>Offers</th><th>Listed</th></tr>`;
     rows = page.map(p => `<tr>
       <td><div class="player-name">${p.first_name} ${p.last_name}</div><div class="player-sub">${p.nationality||'—'} · ${p.club||'—'} (Div ${p.club_division||'—'})</div></td>
       <td><span class="badge badge-pos">${p.position||'—'}</span></td>
@@ -409,6 +442,7 @@ function renderTable() {
       <td>${p.pace??'—'}</td><td>${p.shooting??'—'}</td><td>${p.passing??'—'}</td>
       <td>${p.dribbling??'—'}</td><td>${p.defense??'—'}</td><td>${p.physical??'—'}</td>
       <td>${p.owner||'—'}</td><td>${p.offer_status||'—'}</td>
+      <td>${listedVal(p.listed_price)}</td>
     </tr>`).join('');
   }
 
@@ -468,8 +502,19 @@ function setTab(tab, el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('min-change-group').style.display = tab === 'improvements' ? '' : 'none';
-  document.getElementById('sort-group').style.display = tab === 'improvements' ? '' : 'none';
   document.getElementById('table-title').textContent = tab === 'improvements' ? 'Player Improvements' : 'All Players';
+
+  // "Change" based sorts only make sense on the Improvements tab, since
+  // All Players rows don't have a baseline to compare against.
+  const sortSelect = document.getElementById('filter-sort');
+  const changeOnlyValues = ['total_change','overall_change','pace_change','shooting_change','passing_change','dribbling_change','defense_change','physical_change'];
+  Array.from(sortSelect.options).forEach(opt => {
+    opt.disabled = tab !== 'improvements' && changeOnlyValues.includes(opt.value);
+  });
+  if (tab !== 'improvements' && changeOnlyValues.includes(sortSelect.value)) {
+    sortSelect.value = 'overall';
+  }
+
   applyFilters();
 }
 
@@ -480,6 +525,7 @@ function resetFilters() {
   document.getElementById('filter-min-change').value = '';
   document.getElementById('filter-division').value = '';
   document.getElementById('filter-min-id').value = '';
+  document.getElementById('filter-listed').value = '';
   document.getElementById('filter-sort').value = 'total_change';
   applyFilters();
 }
@@ -490,13 +536,13 @@ function exportCSV() {
   if (!filteredData.length) return;
   const isImp = currentTab === 'improvements';
   const h = isImp
-    ? ['ID','Name','Position','Age','Nationality','Club','Division','OVR Before','OVR After','OVR Change','PAC Change','SHO Change','PAS Change','DRI Change','DEF Change','PHY Change','Owner','Offer Status']
-    : ['ID','Name','Position','Age','Nationality','Club','Division','Overall','Pace','Shooting','Passing','Dribbling','Defense','Physical','Owner','Offer Status'];
+    ? ['ID','Name','Position','Age','Nationality','Club','Division','OVR Before','OVR After','OVR Change','PAC Change','SHO Change','PAS Change','DRI Change','DEF Change','PHY Change','Owner','Offer Status','Listed Price']
+    : ['ID','Name','Position','Age','Nationality','Club','Division','Overall','Pace','Shooting','Passing','Dribbling','Defense','Physical','Owner','Offer Status','Listed Price'];
   const rows = filteredData.map(p => isImp
-    ? [p.ID,`${p.first_name} ${p.last_name}`,p.position,p.age,p.nationality,p.club,p.club_division,p.sos_overall,p.overall,p.overall_change,p.pace_change,p.shooting_change,p.passing_change,p.dribbling_change,p.defense_change,p.physical_change,p.owner,p.offer_status]
-    : [p.ID,`${p.first_name} ${p.last_name}`,p.position,p.age,p.nationality,p.club,p.club_division,p.overall,p.pace,p.shooting,p.passing,p.dribbling,p.defense,p.physical,p.owner,p.offer_status]
+    ? [p.ID,`${p.first_name} ${p.last_name}`,p.position,p.age,p.nationality,p.club,p.club_division,p.sos_overall,p.overall,p.overall_change,p.pace_change,p.shooting_change,p.passing_change,p.dribbling_change,p.defense_change,p.physical_change,p.owner,p.offer_status,p.listed_price]
+    : [p.ID,`${p.first_name} ${p.last_name}`,p.position,p.age,p.nationality,p.club,p.club_division,p.overall,p.pace,p.shooting,p.passing,p.dribbling,p.defense,p.physical,p.owner,p.offer_status,p.listed_price]
   );
-  const csv = [h,...rows].map(r=>r.map(v=>`"${String(v||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const csv = [h,...rows].map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download = `mfl_${currentTab}_${new Date().toISOString().slice(0,10)}.csv`;
