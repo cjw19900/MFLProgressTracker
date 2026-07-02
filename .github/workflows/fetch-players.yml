@@ -2,7 +2,7 @@ name: Daily MFL Player Fetch
 
 on:
   schedule:
-    - cron: '30 9 * * *'
+    - cron: '30 8 * * *'
   workflow_dispatch:
 
 permissions:
